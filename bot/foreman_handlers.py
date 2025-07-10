@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, InputMediaPhoto
+from aiogram.types import Message, CallbackQuery, InputMediaPhoto, FSInputFile
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -11,6 +11,8 @@ from database.models import User, Object, Tool, ToolRequest, InventoryCheck
 from aiogram import Bot
 from datetime import datetime
 import xml.etree.ElementTree as ET
+from services.qr_service import QRCodeService
+from services.inventory_report_service import InventoryReportService
 
 router = Router()
 
@@ -62,21 +64,20 @@ async def show_registrations(callback: CallbackQuery):
         return
     db = SessionLocal()
     try:
-        # Показываем только пользователей с ролью 1 (в обработке) на данном объекте
         registrations = db.query(User).filter(
             User.object_id == user.object.id, 
-            User.role_id == 1  # Только "в обработке"
+            User.role_id == 1
         ).all()
     finally:
         db.close()
     if not registrations:
-        await callback.message.answer(MSG_NO_REGISTRATIONS)
+        await callback.message.edit_text("Нет новых заявок на регистрацию на ваш объект.", reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
         return
     for reg in registrations:
         builder = InlineKeyboardBuilder()
         builder.button(text="✅ Подтвердить", callback_data=f"approve_reg_{reg.id}")
         builder.button(text="❌ Отклонить", callback_data=f"reject_reg_{reg.id}")
-        await callback.message.answer(MSG_REG_REQUEST.format(username=reg.username, name=reg.name or 'Без имени'), reply_markup=builder.as_markup())
+        await callback.message.edit_text(f"Заявка на регистрацию: {reg.username} ({reg.name or 'Без имени'})", reply_markup=builder.as_markup())
 
 @router.callback_query(F.data.startswith("approve_reg_"))
 async def approve_registration(callback: CallbackQuery):
@@ -87,8 +88,7 @@ async def approve_registration(callback: CallbackQuery):
         await callback.answer(MSG_NO_OBJECT, show_alert=True)
         return
     if UserService.approve_user(reg_id, foreman.object.id):
-        await callback.message.answer(MSG_REG_APPROVED)
-        # Уведомляем пользователя
+        await callback.message.edit_text("Регистрация подтверждена!", reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
         user = UserService.get_user_by_id(reg_id)
         if user:
             try:
@@ -105,8 +105,7 @@ async def approve_registration(callback: CallbackQuery):
 async def reject_registration(callback: CallbackQuery):
     reg_id = int(callback.data.removeprefix("reject_reg_"))
     if UserService.reject_user(reg_id):
-        await callback.message.answer(MSG_REG_REJECTED)
-        # Уведомляем пользователя
+        await callback.message.edit_text("Регистрация отклонена!", reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
         user = UserService.get_user_by_id(reg_id)
         if user:
             try:
@@ -127,14 +126,33 @@ async def show_foreman_tools(callback: CallbackQuery):
     if not user or not user.object:
         await callback.answer(MSG_NO_OBJECT, show_alert=True)
         return
-    tools = user.object.tools
+    
+    # Перезагружаем объект в текущей сессии с загрузкой связанных данных
+    db = SessionLocal()
+    try:
+        object_with_tools = db.query(Object).filter(Object.id == user.object.id).first()
+        if not object_with_tools:
+            await callback.answer(MSG_NO_OBJECT, show_alert=True)
+            return
+        
+        # Загружаем инструменты с их связанными данными
+        tools = db.query(Tool).filter(Tool.current_object_id == user.object.id).all()
+        
+        # Предзагружаем связанные данные для каждого инструмента
+        for tool in tools:
+            _ = tool.tool_name.name  # Загружаем tool_name
+            _ = tool.status.name     # Загружаем status
+            _ = tool.inventory_number  # Загружаем inventory_number
+    finally:
+        db.close()
+    
     if not tools:
-        await callback.message.answer(MSG_NO_TOOLS)
+        await callback.message.edit_text(MSG_NO_TOOLS, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
         return
     text = MSG_TOOLS_LIST
     for tool in tools:
         text += f"• {tool.tool_name.name} (инв. №{tool.inventory_number}) — {tool.status.name}\n"
-    await callback.message.answer(text)
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
 
 # Просмотр и обработка заявок на инструменты
 @router.callback_query(F.data == "foreman_requests")
@@ -146,44 +164,120 @@ async def show_foreman_requests(callback: CallbackQuery):
         return
     db = SessionLocal()
     try:
-        requests = db.query(ToolRequest).filter(ToolRequest.from_object_id == user.object.id).all()
+        # Показываем только заявки, которые еще не выполнены (не имеют статус "Выполнено")
+        requests = db.query(ToolRequest).filter(
+            ToolRequest.from_object_id == user.object.id,
+            ToolRequest.status_id != 2  # 2 = "Выполнено"
+        ).all()
+        
+        # Предзагружаем связанные данные в текущей сессии
+        request_data = []
+        for req in requests:
+            tool_name = req.tool.tool_name.name if req.tool and req.tool.tool_name else "Неизвестный инструмент"
+            inventory_number = req.tool.inventory_number if req.tool else "Без номера"
+            to_object_name = req.to_object.name if req.to_object else "Неизвестный объект"
+            requester_name = req.requester.name if req.requester else "Неизвестный пользователь"
+            requester_username = req.requester.username if req.requester else "Без username"
+            request_data.append({
+                'id': req.id,
+                'tool_name': tool_name,
+                'inventory_number': inventory_number,
+                'to_object_name': to_object_name,
+                'requester_name': requester_name,
+                'requester_username': requester_username
+            })
     finally:
         db.close()
-    if not requests:
-        await callback.message.answer(MSG_NO_TOOL_REQUESTS)
+    
+    if not request_data:
+        await callback.message.edit_text("Нет заявок на передачу инструментов.", reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
         return
-    for req in requests:
+    
+    # Отправляем каждую заявку отдельным сообщением
+    for req_data in request_data:
         builder = InlineKeyboardBuilder()
-        builder.button(text="✅ Одобрить", callback_data=f"approve_req_{req.id}")
-        builder.button(text="❌ Отклонить", callback_data=f"reject_req_{req.id}")
-        await callback.message.answer(MSG_TOOL_REQUEST.format(tool_name=req.tool.tool_name.name, inv_num=req.tool.inventory_number, to_object=req.to_object.name), reply_markup=builder.as_markup())
+        builder.button(text="✅ Одобрить", callback_data=f"approve_req_{req_data['id']}")
+        builder.button(text="❌ Отклонить", callback_data=f"reject_req_{req_data['id']}")
+        builder.adjust(2)
+        
+        message_text = f"📋 Заявка на инструмент\n\n"
+        message_text += f"🔧 Инструмент: {req_data['tool_name']}\n"
+        message_text += f"📝 Инв. номер: {req_data['inventory_number']}\n"
+        message_text += f"🏗️ Объект назначения: {req_data['to_object_name']}\n"
+        message_text += f"👤 Отправитель: {req_data['requester_name']} ({req_data['requester_username']})"
+        
+        await callback.message.answer(message_text, reply_markup=builder.as_markup())
+    
+    # Отправляем сообщение с кнопкой "Назад"
+    await callback.message.answer("📋 Все заявки на инструменты:", reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
 
 @router.callback_query(F.data.startswith("approve_req_"))
 async def approve_tool_request(callback: CallbackQuery):
     req_id = int(callback.data.removeprefix("approve_req_"))
+    
+    # Получаем пользователя, который обрабатывает заявку
+    username = f"@{callback.from_user.username}" if callback.from_user.username else None
+    approver = UserService.get_user_by_username(username)
+    if not approver:
+        await callback.answer("❌ Не удалось определить пользователя!", show_alert=True)
+        return
+    
     db = SessionLocal()
     try:
         req = db.query(ToolRequest).filter(ToolRequest.id == req_id).first()
         if req:
-            req.status_id = 2  # Одобрено
+            # Меняем статус на "Выполнено" (id = 2)
+            req.status_id = 2
+            # Устанавливаем approver_id
+            req.approver_id = approver.id
+            # Перемещаем инструмент на новый объект
             req.tool.current_object_id = req.to_object_id
             db.commit()
+            
+            # Удаляем сообщение с заявкой
+            await callback.message.delete()
+            # Отправляем уведомление
+            await callback.answer("✅ Заявка обработана, инструмент передан!", show_alert=True)
+        else:
+            await callback.answer("❌ Заявка не найдена!", show_alert=True)
+    except Exception as e:
+        print(f"Ошибка при обработке заявки: {e}")
+        await callback.answer("❌ Ошибка при обработке заявки!", show_alert=True)
     finally:
         db.close()
-    await callback.message.answer(MSG_TOOL_REQUEST_APPROVED)
 
 @router.callback_query(F.data.startswith("reject_req_"))
 async def reject_tool_request(callback: CallbackQuery):
     req_id = int(callback.data.removeprefix("reject_req_"))
+    
+    # Получаем пользователя, который обрабатывает заявку
+    username = f"@{callback.from_user.username}" if callback.from_user.username else None
+    approver = UserService.get_user_by_username(username)
+    if not approver:
+        await callback.answer("❌ Не удалось определить пользователя!", show_alert=True)
+        return
+    
     db = SessionLocal()
     try:
         req = db.query(ToolRequest).filter(ToolRequest.id == req_id).first()
         if req:
-            req.status_id = 3  # Отклонено
+            # Меняем статус на "Выполнено" (id = 2)
+            req.status_id = 2
+            # Устанавливаем approver_id
+            req.approver_id = approver.id
             db.commit()
+            
+            # Удаляем сообщение с заявкой
+            await callback.message.delete()
+            # Отправляем уведомление
+            await callback.answer("✅ Заявка обработана!", show_alert=True)
+        else:
+            await callback.answer("❌ Заявка не найдена!", show_alert=True)
+    except Exception as e:
+        print(f"Ошибка при обработке заявки: {e}")
+        await callback.answer("❌ Ошибка при обработке заявки!", show_alert=True)
     finally:
         db.close()
-    await callback.message.answer(MSG_TOOL_REQUEST_REJECTED)
 
 # Инвентаризация: FSM для сбора фото QR-кодов
 from aiogram.fsm.state import State, StatesGroup
@@ -195,14 +289,37 @@ class InventoryStates(StatesGroup):
 @router.callback_query(F.data == "start_inventory")
 async def start_inventory(callback: CallbackQuery, state: FSMContext):
     await state.set_state(InventoryStates.waiting_for_photos)
-    await callback.message.answer(MSG_INVENTORY_PHOTO_PROMPT)
+    # Сохраняем ID сообщения для последующего редактирования
+    await state.update_data(message_id=callback.message.message_id)
+    await callback.message.edit_text("Отправьте фотографии QR-кодов всех инструментов на объекте одним или несколькими сообщениями.\n\n📸 Фотографий получено: 0", reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
 
 @router.message(InventoryStates.waiting_for_photos)
 async def receive_photos(message: Message, state: FSMContext):
     photos = (await state.get_data()).get("photos", [])
     photos.append(message.photo[-1].file_id)
     await state.update_data(photos=photos)
-    await message.answer(MSG_INVENTORY_PHOTO_RECEIVED, reply_markup=InlineKeyboardBuilder().button(text="Подтвердить", callback_data="confirm_inventory").as_markup())
+    
+    # Получаем ID сообщения для редактирования
+    data = await state.get_data()
+    message_id = data.get("message_id")
+    
+    # Создаем клавиатуру с кнопкой "Подтвердить" только если есть фотографии
+    builder = InlineKeyboardBuilder()
+    if len(photos) > 0:
+        builder.button(text="✅ Подтвердить", callback_data="confirm_inventory")
+    builder.button(text="🔙 Назад", callback_data="back_to_menu")
+    builder.adjust(1)
+    
+    # Редактируем исходное сообщение
+    try:
+        await message.bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=message_id,
+            text=f"Отправьте фотографии QR-кодов всех инструментов на объекте одним или несколькими сообщениями.\n\n📸 Фотографий получено: {len(photos)}",
+            reply_markup=builder.as_markup()
+        )
+    except Exception as e:
+        print(f"Ошибка редактирования сообщения: {e}")
 
 @router.callback_query(F.data == "confirm_inventory")
 async def confirm_inventory(callback: CallbackQuery, state: FSMContext):
@@ -213,20 +330,81 @@ async def confirm_inventory(callback: CallbackQuery, state: FSMContext):
     if not user or not user.object:
         await callback.answer(MSG_NO_OBJECT, show_alert=True)
         return
-    # Сохраняем инвентаризацию
-    check = InventoryCheckService.create_check(user_id=user.id, object_id=user.object.id, date=datetime.utcnow())
-    # Генерируем XML для 1C
-    root = ET.Element("InventoryCheck")
-    ET.SubElement(root, "Object").text = user.object.name
-    ET.SubElement(root, "Date").text = check.date.strftime("%Y-%m-%d %H:%M:%S")
-    ET.SubElement(root, "User").text = user.username
-    photos_elem = ET.SubElement(root, "Photos")
-    for file_id in photos:
-        ET.SubElement(photos_elem, "Photo").text = file_id
-    xml_str = ET.tostring(root, encoding="utf-8").decode("utf-8")
-    # Отправляем отчёт и XML
-    await callback.message.answer(MSG_INVENTORY_DONE)
-    await callback.message.answer(f"<pre>{xml_str}</pre>", parse_mode="HTML")
+    
+    # Показываем сообщение о начале обработки
+    await callback.message.edit_text("🔍 Обрабатываю фотографии и распознаю QR-коды...", reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
+    
+    try:
+        # Обрабатываем фотографии и получаем результаты
+        found_tools, missing_tools = await QRCodeService.process_inventory_photos(
+            photos, user.object.id, callback.bot
+        )
+        
+        # Обновляем статусы инструментов в базе данных
+        QRCodeService.update_inventory_statuses(found_tools, missing_tools)
+        
+        # Создаем запись об инвентаризации
+        check = InventoryCheckService.create_check(
+            user_id=user.id, 
+            object_id=user.object.id, 
+            date=datetime.utcnow()
+        )
+        
+        # Генерируем отчет
+        total_tools = len(found_tools) + len(missing_tools)
+        xml_report = InventoryReportService.generate_inventory_xml(
+            object_name=user.object.name,
+            user_name=user.username,
+            date=check.date,
+            found_tools=found_tools,
+            missing_tools=missing_tools,
+            total_tools=total_tools
+        )
+        
+        # Генерируем текстовое резюме
+        summary_text = InventoryReportService.generate_summary_text(
+            object_name=user.object.name,
+            found_tools=found_tools,
+            missing_tools=missing_tools,
+            total_tools=total_tools
+        )
+        
+        # Отправляем результаты
+        await callback.message.edit_text(
+            summary_text,
+            reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup()
+        )
+        
+        # Отправляем XML-отчет как файл
+        import tempfile
+        import os
+        
+        # Создаем временный файл
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False, encoding='utf-8') as temp_file:
+            temp_file.write(xml_report)
+            temp_file_path = temp_file.name
+        
+        try:
+            # Отправляем файл
+            await callback.message.answer_document(
+                document=FSInputFile(
+                    path=temp_file_path,
+                    filename=f"inventory_report_{user.object.name}_{check.date.strftime('%Y%m%d_%H%M%S')}.xml"
+                ),
+                caption=f"📄 XML-отчет инвентаризации объекта '{user.object.name}' от {check.date.strftime('%d.%m.%Y %H:%M')}"
+            )
+        finally:
+            # Удаляем временный файл
+            if os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
+        
+    except Exception as e:
+        print(f"Ошибка при обработке инвентаризации: {e}")
+        await callback.message.edit_text(
+            f"❌ Ошибка при обработке инвентаризации: {str(e)}",
+            reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup()
+        )
+    
     await state.clear()
 
 @router.callback_query(F.data == "object_workers")
@@ -242,9 +420,19 @@ async def show_object_workers(callback: CallbackQuery):
     finally:
         db.close()
     if not workers:
-        await callback.message.answer(MSG_NO_WORKERS)
+        await callback.message.edit_text("На вашем объекте нет рабочих.", reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
         return
-    text = MSG_WORKERS_LIST
+    text = "👷 Рабочие на объекте:\n"
     for w in workers:
         text += f"• {w.username} ({w.name or 'Без имени'})\n"
-    await callback.message.answer(text) 
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
+
+# Обработчик кнопки "Назад" - возврат в главное меню
+@router.callback_query(F.data == "back_to_menu")
+async def back_to_menu(callback: CallbackQuery):
+    username = f"@{callback.from_user.username}" if callback.from_user.username else None
+    user = UserService.get_user_by_username(username)
+    if user and user.role and user.role.name == "прораб объекта":
+        await callback.message.edit_text(MSG_FOREMAN_MENU, reply_markup=get_foreman_menu())
+    else:
+        await callback.message.edit_text("✅ Вы уже зарегистрированы!", reply_markup=get_worker_menu()) 

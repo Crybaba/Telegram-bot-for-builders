@@ -6,7 +6,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from services.user_service import UserService
 from services.tool_request_service import ToolRequestService
 from database.connection import get_db, SessionLocal
-from database.models import User, Object, Tool, RequestStatus
+from database.models import User, Object, Tool, RequestStatus, Status
 from aiogram import Bot
 from services.inventory_check_service import InventoryCheckService
 from sqlalchemy.orm import Session
@@ -43,7 +43,7 @@ class RegistrationStates(StatesGroup):
     waiting_for_object = State()
 
 # Главное меню для рабочего
-def get_worker_menu():
+def get_worker_menu(foreman_username=None):
     builder = InlineKeyboardBuilder()
     builder.button(text="🔧 Инструменты на объекте", callback_data="my_tools")
     builder.button(text="📦 Запросить инструмент", callback_data="request_tool")
@@ -75,8 +75,26 @@ async def cmd_start(message: Message, state: FSMContext):
             reply_markup=InlineKeyboardBuilder().button(text="📝 Зарегистрироваться", callback_data="register").as_markup()
         )
         return
+    # Получаем информацию о бригадире объекта
+    db = SessionLocal()
+    try:
+        foreman = db.query(User).filter(
+            User.object_id == user.object.id,
+            User.role_id == 2  # 2 = "прораб объекта"
+        ).first()
+        foreman_username = foreman.username if foreman else None
+    finally:
+        db.close()
+    
+    # Формируем сообщение с информацией о бригадире
+    menu_text = MSG_ALREADY_REGISTERED
+    if foreman_username:
+        menu_text += f"\n\n👷 Ваш бригадир: {foreman_username}"
+    else:
+        menu_text += f"\n\n👷 Бригадир не назначен"
+    
     await message.answer(
-        MSG_ALREADY_REGISTERED,
+        menu_text,
         reply_markup=get_worker_menu()
     )
 
@@ -85,39 +103,58 @@ async def cmd_start(message: Message, state: FSMContext):
 async def show_my_tools(callback: CallbackQuery):
     username = callback.from_user.username
     if not username:
-        if callback.message:
-            await callback.message.answer(MSG_NO_OBJECT)
+        await callback.answer(MSG_NO_OBJECT, show_alert=True)
         return
     username = f"@{username}"
     user = UserService.get_user_by_username(username)
     if not user or not getattr(user, 'object', None):
-        if callback.message:
-            await callback.message.answer(MSG_NO_OBJECT)
+        await callback.answer(MSG_NO_OBJECT, show_alert=True)
         return
-    tools = user.object.tools
+    
+    # Перезагружаем объект в текущей сессии с загрузкой связанных данных
+    db = SessionLocal()
+    try:
+        object_with_tools = db.query(Object).filter(Object.id == user.object.id).first()
+        if not object_with_tools:
+            await callback.answer(MSG_NO_OBJECT, show_alert=True)
+            return
+        
+        # Загружаем инструменты с их связанными данными
+        tools = db.query(Tool).filter(Tool.current_object_id == user.object.id).all()
+        
+        # Предзагружаем связанные данные для каждого инструмента
+        for tool in tools:
+            _ = tool.tool_name.name  # Загружаем tool_name
+            _ = tool.status.name     # Загружаем status
+            _ = tool.inventory_number  # Загружаем inventory_number
+    finally:
+        db.close()
+    
     if not tools:
         if callback.message:
-            await callback.message.answer(MSG_NO_TOOLS)
+            await callback.message.edit_text(MSG_NO_TOOLS, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
+        else:
+            await callback.message.answer(MSG_NO_TOOLS, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
         return
     text = MSG_TOOLS_LIST
     for tool in tools:
         text += f"• {tool.tool_name.name} (инв. №{tool.inventory_number}) — {tool.status.name}\n"
     if callback.message:
-        await callback.message.answer(text)
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
+    else:
+        await callback.message.answer(text, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
 
 # Запросить инструмент с другого объекта
 @router.callback_query(F.data == "request_tool")
 async def request_tool(callback: CallbackQuery, state: FSMContext):
     username = callback.from_user.username
     if not username:
-        if callback.message:
-            await callback.message.answer(MSG_NO_OBJECT)
+        await callback.answer(MSG_NO_OBJECT, show_alert=True)
         return
     username = f"@{username}"
     user = UserService.get_user_by_username(username)
     if not user or not getattr(user, 'object', None):
-        if callback.message:
-            await callback.message.answer(MSG_NO_OBJECT)
+        await callback.answer(MSG_NO_OBJECT, show_alert=True)
         return
     db = SessionLocal()
     try:
@@ -126,7 +163,9 @@ async def request_tool(callback: CallbackQuery, state: FSMContext):
         db.close()
     if not objects:
         if callback.message:
-            await callback.message.answer(MSG_NO_OTHER_OBJECTS)
+            await callback.message.edit_text(MSG_NO_OTHER_OBJECTS, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
+        else:
+            await callback.message.answer(MSG_NO_OTHER_OBJECTS, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
         return
     builder = InlineKeyboardBuilder()
     for obj in objects:
@@ -134,62 +173,86 @@ async def request_tool(callback: CallbackQuery, state: FSMContext):
     builder.button(text="🔙 Назад", callback_data="back_to_menu")
     builder.adjust(1)
     if callback.message:
+        await callback.message.edit_text(MSG_SELECT_DONOR_OBJECT, reply_markup=builder.as_markup())
+    else:
         await callback.message.answer(MSG_SELECT_DONOR_OBJECT, reply_markup=builder.as_markup())
 
 @router.callback_query(F.data.startswith("select_donor_"))
 async def select_donor_object(callback: CallbackQuery, state: FSMContext):
     data = callback.data or ""
     if not data.startswith("select_donor_"):
-        if callback.message:
-            await callback.message.answer(MSG_OBJECT_NOT_FOUND)
+        await callback.answer(MSG_OBJECT_NOT_FOUND, show_alert=True)
         return
     donor_object_id = int(data.removeprefix("select_donor_"))
     db = SessionLocal()
     try:
         donor_object = db.query(Object).filter(Object.id == donor_object_id).first()
-        tools = db.query(Tool).filter(Tool.current_object_id == donor_object_id).all()
+        
+        # Получаем статус "В наличии"
+        available_status = db.query(Status).filter(Status.name == "В наличии").first()
+        if not available_status:
+            await callback.answer("❌ Статус 'В наличии' не найден в базе данных!", show_alert=True)
+            return
+        
+        # Загружаем только инструменты со статусом "В наличии"
+        tools = db.query(Tool).filter(
+            Tool.current_object_id == donor_object_id,
+            Tool.status_id == available_status.id
+        ).all()
+        
+        # Предзагружаем связанные данные в текущей сессии
+        tool_data = []
+        for tool in tools:
+            tool_name = tool.tool_name.name if tool.tool_name else "Неизвестный инструмент"
+            inventory_number = tool.inventory_number or "Без номера"
+            tool_data.append({
+                'id': tool.id,
+                'name': tool_name,
+                'inventory_number': inventory_number
+            })
     finally:
         db.close()
+    
     if not donor_object:
-        if callback.message:
-            await callback.message.answer(MSG_OBJECT_NOT_FOUND)
+        await callback.answer(MSG_OBJECT_NOT_FOUND, show_alert=True)
         return
-    if not tools:
+    if not tool_data:
         if callback.message:
-            await callback.message.answer(MSG_NO_TOOLS_ON_OBJECT)
+            await callback.message.edit_text(MSG_NO_TOOLS_ON_OBJECT, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="request_tool").as_markup())
+        else:
+            await callback.message.answer(MSG_NO_TOOLS_ON_OBJECT, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="request_tool").as_markup())
         return
+    
     builder = InlineKeyboardBuilder()
-    for tool in tools:
-        builder.button(text=f"{tool.tool_name_id} (инв. №{tool.inventory_number})", callback_data=f"request_tool_{tool.id}_{donor_object_id}")
+    for tool in tool_data:
+        builder.button(text=f"{tool['name']} (инв. №{tool['inventory_number']})", callback_data=f"request_tool_{tool['id']}_{donor_object_id}")
     builder.button(text="🔙 Назад", callback_data="request_tool")
     builder.adjust(1)
     if callback.message:
+        await callback.message.edit_text(MSG_SELECT_TOOL, reply_markup=builder.as_markup())
+    else:
         await callback.message.answer(MSG_SELECT_TOOL, reply_markup=builder.as_markup())
 
 @router.callback_query(F.data.startswith("request_tool_"))
 async def confirm_tool_request(callback: CallbackQuery, state: FSMContext):
     data = callback.data or ""
     if not data.startswith("request_tool_"):
-        if callback.message:
-            await callback.message.answer(MSG_NO_OBJECT)
+        await callback.answer(MSG_NO_OBJECT, show_alert=True)
         return
     parts = data.split("_")
     if len(parts) < 4:
-        if callback.message:
-            await callback.message.answer(MSG_NO_OBJECT)
+        await callback.answer(MSG_NO_OBJECT, show_alert=True)
         return
     tool_id = int(parts[2])
     from_object_id = int(parts[3])
     username = callback.from_user.username
     if not username:
-        if callback.message:
-            await callback.message.answer(MSG_NO_OBJECT)
+        await callback.answer(MSG_NO_OBJECT, show_alert=True)
         return
     username = f"@{username}"
     user = UserService.get_user_by_username(username)
     if not user or not getattr(user, 'object', None):
-        if callback.message:
-            await callback.message.answer(MSG_NO_OBJECT)
+        await callback.answer(MSG_NO_OBJECT, show_alert=True)
         return
     # Корректно получаем int id
     user_id = user.id
@@ -200,8 +263,7 @@ async def confirm_tool_request(callback: CallbackQuery, state: FSMContext):
     except Exception:
         user_id_int = None
     if user_id_int is None:
-        if callback.message:
-            await callback.message.answer(MSG_NO_OBJECT)
+        await callback.answer(MSG_NO_OBJECT, show_alert=True)
         return
     ToolRequestService.create_request(
         tool_id=tool_id,
@@ -210,7 +272,9 @@ async def confirm_tool_request(callback: CallbackQuery, state: FSMContext):
         to_object_id=user.object.id
     )
     if callback.message:
-        await callback.message.answer(MSG_REQUEST_SENT)
+        await callback.message.edit_text(MSG_REQUEST_SENT, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
+    else:
+        await callback.message.answer(MSG_REQUEST_SENT, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
 
 # Уведомления о статусе заявки (пример функции для отправки уведомления)
 async def notify_user_about_request(bot: Bot, user_id: int, status: str, tool_name: str):
@@ -288,3 +352,41 @@ async def process_object_selection(callback: CallbackQuery, state: FSMContext):
 async def cancel_registration(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.answer(MSG_REG_CANCELLED) 
+
+# Обработчик кнопки "Назад" - возврат в главное меню
+@router.callback_query(F.data == "back_to_menu")
+async def back_to_menu(callback: CallbackQuery):
+    username = callback.from_user.username
+    if not username:
+        await callback.answer(MSG_NO_OBJECT, show_alert=True)
+        return
+    username = f"@{username}"
+    user = UserService.get_user_by_username(username)
+    if user and user.role and user.role.name == "прораб объекта":
+        if callback.message:
+            await callback.message.edit_text(MSG_FOREMAN_MENU, reply_markup=get_foreman_menu())
+        else:
+            await callback.message.answer(MSG_FOREMAN_MENU, reply_markup=get_foreman_menu())
+    else:
+        # Получаем информацию о бригадире объекта
+        db = SessionLocal()
+        try:
+            foreman = db.query(User).filter(
+                User.object_id == user.object.id,
+                User.role_id == 2  # 2 = "прораб объекта"
+            ).first()
+            foreman_username = foreman.username if foreman else None
+        finally:
+            db.close()
+        
+        # Формируем сообщение с информацией о бригадире
+        menu_text = MSG_ALREADY_REGISTERED
+        if foreman_username:
+            menu_text += f"\n\n👷 Ваш бригадир: {foreman_username}"
+        else:
+            menu_text += f"\n\n👷 Бригадир не назначен"
+        
+        if callback.message:
+            await callback.message.edit_text(menu_text, reply_markup=get_worker_menu())
+        else:
+            await callback.message.answer(menu_text, reply_markup=get_worker_menu()) 
