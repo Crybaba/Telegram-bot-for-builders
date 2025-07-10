@@ -4,14 +4,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Bot configuration
-BOT_TOKEN = "7662805259:AAF7exxRK6dmeps3rq3RkXek_umMHT3p808"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # Database configuration
-DB_USERNAME = "postgres"
-DB_PASSWORD = "postgres"
-DB_NAME = "Bot"
-DB_HOST = "localhost"
-DB_PORT = "5432"
+DB_USERNAME = os.getenv("DB_USERNAME")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_NAME = os.getenv("DB_NAME")
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
 
 # Database URL
 DATABASE_URL = f"postgresql://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}" 
