@@ -40,6 +40,14 @@ MSG_REG_SENT = "Спасибо, {name}! Ваша заявка на регист�
 MSG_REG_CANCELLED = "Регистрация отменена."
 MSG_REQUEST_STATUS = "Ваша заявка на инструмент '{tool_name}' {status}!"
 
+MSG_ABOUT = """
+🤖 <b>Telegram-бот для строительных объектов</b>
+
+<b>Создатели:</b>
+@dostopocht
+@chipul1a
+"""
+
 class RegistrationStates(StatesGroup):
     waiting_for_name = State()
     waiting_for_object = State()
@@ -49,6 +57,7 @@ def get_worker_menu(foreman_username=None):
     builder = InlineKeyboardBuilder()
     builder.button(text="🔧 Инструменты на объекте", callback_data="my_tools")
     builder.button(text="📦 Запросить инструмент", callback_data="request_tool")
+    builder.button(text="ℹ️ О боте", callback_data="about_bot")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -396,3 +405,11 @@ async def back_to_menu(callback: CallbackQuery):
             await callback.message.edit_text(menu_text, reply_markup=get_worker_menu())
         else:
             await callback.message.answer(menu_text, reply_markup=get_worker_menu()) 
+
+@router.message(Command("about"))
+async def about_command(message: Message):
+    await message.answer(MSG_ABOUT, parse_mode="HTML")
+
+@router.callback_query(F.data == "about_bot")
+async def about_callback(callback: CallbackQuery):
+    await callback.message.answer(MSG_ABOUT, parse_mode="HTML") 
