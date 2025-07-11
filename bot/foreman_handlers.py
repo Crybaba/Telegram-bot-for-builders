@@ -13,6 +13,37 @@ from datetime import datetime
 import xml.etree.ElementTree as ET
 from services.qr_service import QRCodeService
 from services.inventory_report_service import InventoryReportService
+from bot import handle_empty_data
+
+async def send_notification_safely(bot: Bot, username: str, message: str) -> bool:
+    """
+    Безопасно отправляет уведомление пользователю.
+    
+    Args:
+        bot: Экземпляр бота
+        username: Username пользователя (с @ или без)
+        message: Текст сообщения
+        
+    Returns:
+        bool: True если сообщение отправлено успешно, False в противном случае
+    """
+    try:
+        # Убираем @ если есть
+        if username.startswith('@'):
+            username = username[1:]
+        
+        # Пытаемся отправить сообщение
+        await bot.send_message(username, message)
+        return True
+    except Exception as e:
+        error_message = str(e).lower()
+        if "chat not found" in error_message or "user not found" in error_message:
+            print(f"Пользователь {username} не найден или не начал диалог с ботом")
+        elif "blocked" in error_message:
+            print(f"Пользователь {username} заблокировал бота")
+        else:
+            print(f"Ошибка отправки уведомления пользователю {username}: {e}")
+        return False
 
 router = Router()
 
@@ -71,7 +102,7 @@ async def show_registrations(callback: CallbackQuery):
     finally:
         db.close()
     if not registrations:
-        await callback.message.edit_text("Нет новых заявок на регистрацию на ваш объект.", reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
+        await handle_empty_data(callback, "Нет новых заявок на регистрацию на ваш объект.", "back_to_menu")
         return
     for reg in registrations:
         builder = InlineKeyboardBuilder()
@@ -90,14 +121,14 @@ async def approve_registration(callback: CallbackQuery):
     if UserService.approve_user(reg_id, foreman.object.id):
         await callback.message.edit_text("Регистрация подтверждена!", reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
         user = UserService.get_user_by_id(reg_id)
-        if user:
-            try:
-                await callback.bot.send_message(
-                    user.username,
+        if user and callback.bot:
+            username = getattr(user, 'username', None)
+            if username:
+                await send_notification_safely(
+                    callback.bot,
+                    str(username),
                     MSG_REG_APPROVED_USER.format(object_name=foreman.object.name)
                 )
-            except Exception as e:
-                print(f"Ошибка отправки уведомления: {e}")
     else:
         await callback.answer(MSG_REG_APPROVE_ERROR, show_alert=True)
 
@@ -107,14 +138,14 @@ async def reject_registration(callback: CallbackQuery):
     if UserService.reject_user(reg_id):
         await callback.message.edit_text("Регистрация отклонена!", reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
         user = UserService.get_user_by_id(reg_id)
-        if user:
-            try:
-                await callback.bot.send_message(
-                    user.username,
+        if user and callback.bot:
+            username = getattr(user, 'username', None)
+            if username:
+                await send_notification_safely(
+                    callback.bot,
+                    str(username),
                     MSG_REG_REJECTED_USER
                 )
-            except Exception as e:
-                print(f"Ошибка отправки уведомления: {e}")
     else:
         await callback.answer(MSG_REG_REJECT_ERROR, show_alert=True)
 
@@ -190,7 +221,7 @@ async def show_foreman_requests(callback: CallbackQuery):
         db.close()
     
     if not request_data:
-        await callback.message.edit_text("Нет заявок на передачу инструментов.", reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
+        await handle_empty_data(callback, "Нет заявок на передачу инструментов.", "back_to_menu")
         return
     
     # Отправляем каждую заявку отдельным сообщением

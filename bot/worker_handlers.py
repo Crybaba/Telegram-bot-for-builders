@@ -12,6 +12,8 @@ from services.inventory_check_service import InventoryCheckService
 from sqlalchemy.orm import Session
 from aiogram.fsm.state import State, StatesGroup
 from bot.foreman_handlers import get_foreman_menu
+from bot import handle_empty_data
+from bot.foreman_handlers import send_notification_safely
 
 router = Router()
 
@@ -131,10 +133,7 @@ async def show_my_tools(callback: CallbackQuery):
         db.close()
     
     if not tools:
-        if callback.message:
-            await callback.message.edit_text(MSG_NO_TOOLS, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
-        else:
-            await callback.message.answer(MSG_NO_TOOLS, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
+        await handle_empty_data(callback, MSG_NO_TOOLS, "back_to_menu")
         return
     text = MSG_TOOLS_LIST
     for tool in tools:
@@ -162,10 +161,7 @@ async def request_tool(callback: CallbackQuery, state: FSMContext):
     finally:
         db.close()
     if not objects:
-        if callback.message:
-            await callback.message.edit_text(MSG_NO_OTHER_OBJECTS, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
-        else:
-            await callback.message.answer(MSG_NO_OTHER_OBJECTS, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
+        await handle_empty_data(callback, MSG_NO_OTHER_OBJECTS, "back_to_menu")
         return
     builder = InlineKeyboardBuilder()
     for obj in objects:
@@ -217,10 +213,7 @@ async def select_donor_object(callback: CallbackQuery, state: FSMContext):
         await callback.answer(MSG_OBJECT_NOT_FOUND, show_alert=True)
         return
     if not tool_data:
-        if callback.message:
-            await callback.message.edit_text(MSG_NO_TOOLS_ON_OBJECT, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="request_tool").as_markup())
-        else:
-            await callback.message.answer(MSG_NO_TOOLS_ON_OBJECT, reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="request_tool").as_markup())
+        await handle_empty_data(callback, MSG_NO_TOOLS_ON_OBJECT, "request_tool")
         return
     
     builder = InlineKeyboardBuilder()
@@ -281,14 +274,11 @@ async def notify_user_about_request(bot: Bot, user_id: int, status: str, tool_na
     user = UserService.get_user_by_id(user_id)
     if not user:
         return
-    username = user.username
-    if not isinstance(username, str):
-        username = str(username)
+    username = getattr(user, 'username', None)
+    if not username:
+        return
     text = MSG_REQUEST_STATUS.format(tool_name=tool_name, status=status.lower())
-    try:
-        await bot.send_message(username, text)
-    except Exception as e:
-        print(f"Ошибка отправки уведомления: {e}")
+    await send_notification_safely(bot, str(username), text)
 
 @router.callback_query(F.data == "register")
 async def start_registration(callback: CallbackQuery, state: FSMContext):
