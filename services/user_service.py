@@ -29,13 +29,13 @@ class UserService:
             db.close()
 
     @staticmethod
-    def create_user(username: str, name: Optional[str] = None, role_name: str = "в обработке", object_id: Optional[int] = None) -> User:
+    def create_user(username: str, name: Optional[str] = None, role_name: str = "в обработке", object_id: Optional[int] = None, chat_id: Optional[int] = None) -> User:
         db = SessionLocal()
         try:
             role = db.query(Role).filter(Role.name == role_name).first()
             if not role:
                 raise ValueError(f"Role '{role_name}' not found")
-            user = User(username=username, name=name, role_id=role.id, object_id=object_id)
+            user = User(username=username, name=name, role_id=role.id, object_id=object_id, chat_id=chat_id)
             db.add(user)
             db.commit()
             db.refresh(user)

@@ -49,6 +49,7 @@ class User(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(255), unique=True, nullable=False)  # @username
+    chat_id = Column(BigInteger, nullable=True)  # Telegram chat_id для отправки уведомлений
     name = Column(Text, nullable=True)  # nullable
     role_id = Column(Integer, ForeignKey("roles.id"), nullable=False)
     object_id = Column(Integer, ForeignKey("object.id"), nullable=True)  # nullable

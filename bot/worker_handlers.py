@@ -62,21 +62,40 @@ async def cmd_start(message: Message, state: FSMContext):
     username = f"@{username}"
     user = UserService.get_user_by_username(username)
     if user and user.role and user.role.name == "прораб объекта":
+        # Обновляем chat_id если его нет
+        if not getattr(user, 'chat_id', None):
+            user_id = user.id
+            if hasattr(user_id, 'value'):
+                user_id = user_id.value
+            UserService.update_user(int(user_id), chat_id=message.chat.id)
         await message.answer(MSG_FOREMAN_MENU, reply_markup=get_foreman_menu())
         return
     if not user:
-        UserService.create_user(username)
+        UserService.create_user(username, chat_id=message.chat.id)
         await message.answer(
             MSG_WELCOME_REGISTER,
             reply_markup=InlineKeyboardBuilder().button(text="📝 Зарегистрироваться", callback_data="register").as_markup()
         )
         return
     if user.role.name == "в обработке" or not getattr(user, 'name', None) or not getattr(user, 'object', None):
+        # Обновляем chat_id если его нет
+        if not getattr(user, 'chat_id', None):
+            user_id = user.id
+            if hasattr(user_id, 'value'):
+                user_id = user_id.value
+            UserService.update_user(int(user_id), chat_id=message.chat.id)
         await message.answer(
             MSG_CONTINUE_REGISTER,
             reply_markup=InlineKeyboardBuilder().button(text="📝 Зарегистрироваться", callback_data="register").as_markup()
         )
         return
+    # Обновляем chat_id если его нет
+    if not getattr(user, 'chat_id', None):
+        user_id = user.id
+        if hasattr(user_id, 'value'):
+            user_id = user_id.value
+        UserService.update_user(int(user_id), chat_id=message.chat.id)
+    
     # Получаем информацию о бригадире объекта
     db = SessionLocal()
     try:
@@ -274,11 +293,8 @@ async def notify_user_about_request(bot: Bot, user_id: int, status: str, tool_na
     user = UserService.get_user_by_id(user_id)
     if not user:
         return
-    username = getattr(user, 'username', None)
-    if not username:
-        return
     text = MSG_REQUEST_STATUS.format(tool_name=tool_name, status=status.lower())
-    await send_notification_safely(bot, str(username), text)
+    await send_notification_safely(bot, user, text)
 
 @router.callback_query(F.data == "register")
 async def start_registration(callback: CallbackQuery, state: FSMContext):

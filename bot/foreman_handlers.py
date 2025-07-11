@@ -15,34 +15,44 @@ from services.qr_service import QRCodeService
 from services.inventory_report_service import InventoryReportService
 from bot import handle_empty_data
 
-async def send_notification_safely(bot: Bot, username: str, message: str) -> bool:
+async def send_notification_safely(bot: Bot, user: any, message: str) -> bool:
     """
     Безопасно отправляет уведомление пользователю.
     
     Args:
         bot: Экземпляр бота
-        username: Username пользователя (с @ или без)
+        user: Объект пользователя из базы данных
         message: Текст сообщения
         
     Returns:
         bool: True если сообщение отправлено успешно, False в противном случае
     """
     try:
-        # Убираем @ если есть
-        if username.startswith('@'):
-            username = username[1:]
+        # Сначала пытаемся отправить по chat_id
+        if hasattr(user, 'chat_id') and user.chat_id:
+            await bot.send_message(user.chat_id, message)
+            return True
         
-        # Пытаемся отправить сообщение
-        await bot.send_message(username, message)
-        return True
+        # Если нет chat_id, пытаемся по username
+        if hasattr(user, 'username') and user.username:
+            username = str(user.username)
+            # Убираем @ если есть
+            if username.startswith('@'):
+                username = username[1:]
+            
+            # Пытаемся отправить сообщение
+            await bot.send_message(username, message)
+            return True
+            
+        return False
     except Exception as e:
         error_message = str(e).lower()
         if "chat not found" in error_message or "user not found" in error_message:
-            print(f"Пользователь {username} не найден или не начал диалог с ботом")
+            print(f"Пользователь {getattr(user, 'username', 'Unknown')} не найден или не начал диалог с ботом")
         elif "blocked" in error_message:
-            print(f"Пользователь {username} заблокировал бота")
+            print(f"Пользователь {getattr(user, 'username', 'Unknown')} заблокировал бота")
         else:
-            print(f"Ошибка отправки уведомления пользователю {username}: {e}")
+            print(f"Ошибка отправки уведомления пользователю {getattr(user, 'username', 'Unknown')}: {e}")
         return False
 
 router = Router()
@@ -69,6 +79,8 @@ MSG_INVENTORY_PHOTO_RECEIVED = "Фото получено. Отправьте е
 MSG_INVENTORY_DONE = "Инвентаризация завершена! Вот XML для 1C:"
 MSG_NO_WORKERS = "На вашем объекте нет рабочих."
 MSG_WORKERS_LIST = "👷 Рабочие на объекте:\n"
+MSG_TOOL_REQUEST_APPROVED = "✅ Ваша заявка на инструмент '{tool_name}' (инв. №{inventory_number}) одобрена! Инструмент передан на объект '{object_name}'."
+MSG_TOOL_REQUEST_REJECTED = "❌ Ваша заявка на инструмент '{tool_name}' (инв. №{inventory_number}) отклонена."
 
 # Главное меню для бригадира
 def get_foreman_menu():
@@ -122,13 +134,11 @@ async def approve_registration(callback: CallbackQuery):
         await callback.message.edit_text("Регистрация подтверждена!", reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
         user = UserService.get_user_by_id(reg_id)
         if user and callback.bot:
-            username = getattr(user, 'username', None)
-            if username:
-                await send_notification_safely(
-                    callback.bot,
-                    str(username),
-                    MSG_REG_APPROVED_USER.format(object_name=foreman.object.name)
-                )
+            await send_notification_safely(
+                callback.bot,
+                user,
+                MSG_REG_APPROVED_USER.format(object_name=foreman.object.name)
+            )
     else:
         await callback.answer(MSG_REG_APPROVE_ERROR, show_alert=True)
 
@@ -139,13 +149,11 @@ async def reject_registration(callback: CallbackQuery):
         await callback.message.edit_text("Регистрация отклонена!", reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back_to_menu").as_markup())
         user = UserService.get_user_by_id(reg_id)
         if user and callback.bot:
-            username = getattr(user, 'username', None)
-            if username:
-                await send_notification_safely(
-                    callback.bot,
-                    str(username),
-                    MSG_REG_REJECTED_USER
-                )
+            await send_notification_safely(
+                callback.bot,
+                user,
+                MSG_REG_REJECTED_USER
+            )
     else:
         await callback.answer(MSG_REG_REJECT_ERROR, show_alert=True)
 
@@ -269,6 +277,18 @@ async def approve_tool_request(callback: CallbackQuery):
             await callback.message.delete()
             # Отправляем уведомление
             await callback.answer("✅ Заявка обработана, инструмент передан!", show_alert=True)
+            
+            # Отправляем уведомление пользователю, который подал заявку
+            if req.requester and callback.bot:
+                tool_name = req.tool.tool_name.name if req.tool and req.tool.tool_name else "инструмент"
+                inventory_number = req.tool.inventory_number if req.tool else "Без номера"
+                object_name = req.to_object.name if req.to_object else "неизвестный объект"
+                notification_message = MSG_TOOL_REQUEST_APPROVED.format(
+                    tool_name=tool_name,
+                    inventory_number=inventory_number,
+                    object_name=object_name
+                )
+                await send_notification_safely(callback.bot, req.requester, notification_message)
         else:
             await callback.answer("❌ Заявка не найдена!", show_alert=True)
     except Exception as e:
@@ -302,6 +322,16 @@ async def reject_tool_request(callback: CallbackQuery):
             await callback.message.delete()
             # Отправляем уведомление
             await callback.answer("✅ Заявка обработана!", show_alert=True)
+            
+            # Отправляем уведомление пользователю, который подал заявку
+            if req.requester and callback.bot:
+                tool_name = req.tool.tool_name.name if req.tool and req.tool.tool_name else "инструмент"
+                inventory_number = req.tool.inventory_number if req.tool else "Без номера"
+                notification_message = MSG_TOOL_REQUEST_REJECTED.format(
+                    tool_name=tool_name,
+                    inventory_number=inventory_number
+                )
+                await send_notification_safely(callback.bot, req.requester, notification_message)
         else:
             await callback.answer("❌ Заявка не найдена!", show_alert=True)
     except Exception as e:
