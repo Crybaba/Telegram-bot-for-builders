@@ -57,7 +57,6 @@ def get_worker_menu(foreman_username=None):
     builder = InlineKeyboardBuilder()
     builder.button(text="🔧 Инструменты на объекте", callback_data="my_tools")
     builder.button(text="📦 Запросить инструмент", callback_data="request_tool")
-    builder.button(text="ℹ️ О боте", callback_data="about_bot")
     builder.adjust(1)
     return builder.as_markup()
 

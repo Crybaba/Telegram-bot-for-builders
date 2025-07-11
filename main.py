@@ -2,6 +2,7 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand, BotCommandScopeDefault
 from config import BOT_TOKEN
 from bot.worker_handlers import router as worker_router
 from bot.foreman_handlers import router as foreman_router
@@ -14,7 +15,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-
 
 # Global bot instance
 bot = None
@@ -35,6 +35,15 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
+
+    # Set bot commands menu
+    await bot.set_my_commands(
+        commands=[
+            BotCommand(command="start", description="Запустить бота / Главное меню"),
+            BotCommand(command="about", description="Информация о боте и создателях"),
+        ],
+        scope=BotCommandScopeDefault()
+    )
 
     # Include routers
     dp.include_router(worker_router)
