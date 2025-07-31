@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 from services.qr_service import QRCodeService
 from services.inventory_report_service import InventoryReportService
 from bot import handle_empty_data
-from worker_handlers import get_worker_menu
+from bot.worker_handlers import get_worker_menu
 
 async def send_notification_safely(bot: Bot, user: any, message: str) -> bool:
     """
